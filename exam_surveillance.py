@@ -1,14 +1,11 @@
 """
-Exam Surveillance System
+Exam Surveillance System v2
 Hệ thống giám sát thi cử với Face Detection + Phone Detection
 
-Tính năng:
-- Đếm số người (face) trong khung hình
-- Phát hiện điện thoại
-- Cảnh báo tự động khi:
-  + Không có người (0 face)
-  + Có nhiều hơn 1 người (2+ faces)
-  + Phát hiện điện thoại
+Cải tiến:
+- Sử dụng YOLOv8 pretrained trên COCO dataset
+- Class "cell phone" đã được train với hàng ngàn ảnh thực tế
+- Độ chính xác cao hơn, ít false positive
 
 Author: AI Assistant
 """
@@ -21,77 +18,57 @@ from datetime import datetime
 import time
 import os
 
-# MediaPipe new API (0.10.x)
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-
 
 class ExamSurveillance:
     """
     Hệ thống giám sát thi cử.
     """
     
-    def __init__(self, phone_model_path: str = None):
+    # COCO class ID for cell phone
+    CELL_PHONE_CLASS_ID = 67
+    
+    def __init__(self):
         """
         Khởi tạo hệ thống.
-        
-        Args:
-            phone_model_path: Đường dẫn đến model phone detector
         """
-        print("🔄 Đang khởi tạo hệ thống giám sát...")
+        print("=" * 60)
+        print("EXAM SURVEILLANCE SYSTEM v2")
+        print("=" * 60)
+        print("Dang khoi tao he thong...")
         
         # Tạo thư mục lưu cảnh báo
-        self.alerts_dir = Path(r"c:\Users\Admin\Desktop\detection\alerts")
+        self.alerts_dir = Path("alerts")
         self.alerts_dir.mkdir(exist_ok=True)
         
-        # Download và load MediaPipe Face Detector model
-        print("   📍 Loading Face Detection...")
-        self.face_detector = self._init_face_detector()
+        # Khởi tạo Face Detector (OpenCV Haar Cascade)
+        print("   [+] Loading Face Detection...")
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        self.face_detector = cv2.CascadeClassifier(cascade_path)
+        print("       OK - OpenCV Haar Cascade")
         
-        # Khởi tạo Phone Detector (YOLOv8)
-        print("   📱 Loading Phone Detector...")
-        if phone_model_path and Path(phone_model_path).exists():
-            self.phone_detector = YOLO(phone_model_path)
-            print(f"      ✅ Loaded: {phone_model_path}")
-        else:
-            # Thử tìm model trong thư mục mặc định
-            default_path = Path(r"c:\Users\Admin\Desktop\detection\models\phone_detector_best.pt")
-            if default_path.exists():
-                self.phone_detector = YOLO(str(default_path))
-                print(f"      ✅ Loaded: {default_path}")
-            else:
-                print("      ⚠️ Không tìm thấy phone model! Chỉ detect face.")
-                self.phone_detector = None
+        # Khởi tạo Phone Detector (YOLOv8 pretrained COCO)
+        # COCO dataset có class "cell phone" (class 67) với annotation thực tế
+        print("   [+] Loading Phone Detection (YOLOv8-COCO)...")
+        self.phone_detector = YOLO('yolov8n.pt')  # Pretrained on COCO
+        print("       OK - YOLOv8n pretrained (cell phone class)")
         
         # Thống kê
         self.alert_count = 0
         self.last_alert_time = 0
         self.alert_cooldown = 3  # Giây giữa các cảnh báo
         
-        print("✅ Hệ thống đã sẵn sàng!\n")
-    
-    def _init_face_detector(self):
-        """
-        Khởi tạo face detector sử dụng OpenCV Haar Cascade (backup).
-        MediaPipe tasks API cần download model, nên dùng OpenCV cho đơn giản.
-        """
-        # Sử dụng OpenCV Haar Cascade - nhẹ và nhanh
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        return face_cascade
+        print("\n[OK] He thong da san sang!")
+        print("=" * 60)
     
     def detect_faces(self, frame):
         """
-        Detect faces trong frame sử dụng OpenCV Haar Cascade.
+        Detect faces trong frame.
         
         Returns:
             Tuple (số face, list các bounding box)
         """
-        # Convert to grayscale
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Detect faces
         faces_detected = self.face_detector.detectMultiScale(
             gray,
             scaleFactor=1.1,
@@ -104,23 +81,26 @@ class ExamSurveillance:
         for (x, y, w, h) in faces_detected:
             faces.append({
                 'bbox': (x, y, w, h),
-                'confidence': 0.9  # Haar cascade không có confidence score
+                'confidence': 0.9
             })
         
         return len(faces), faces
     
     def detect_phones(self, frame):
         """
-        Detect phones trong frame sử dụng YOLOv8.
+        Detect phones trong frame sử dụng YOLOv8 COCO pretrained.
+        Chỉ lấy class "cell phone" (class 67).
         
         Returns:
             Tuple (có phone hay không, list các detections)
         """
-        if self.phone_detector is None:
-            return False, []
-        
-        # Inference
-        results = self.phone_detector(frame, conf=0.4, verbose=False)
+        # Inference với confidence threshold cao hơn
+        results = self.phone_detector(
+            frame, 
+            conf=0.5,           # Confidence threshold
+            classes=[67],       # Chỉ detect class 67 = cell phone
+            verbose=False
+        )
         
         phones = []
         for result in results:
@@ -128,19 +108,20 @@ class ExamSurveillance:
             for box in boxes:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                 confidence = float(box.conf[0])
-                phones.append({
-                    'bbox': (x1, y1, x2 - x1, y2 - y1),
-                    'confidence': confidence
-                })
+                class_id = int(box.cls[0])
+                
+                # Double check class ID
+                if class_id == self.CELL_PHONE_CLASS_ID:
+                    phones.append({
+                        'bbox': (x1, y1, x2 - x1, y2 - y1),
+                        'confidence': confidence
+                    })
         
         return len(phones) > 0, phones
     
     def check_violation(self, face_count: int, has_phone: bool):
         """
         Kiểm tra vi phạm.
-        
-        Returns:
-            Tuple (có vi phạm không, loại vi phạm)
         """
         violations = []
         
@@ -160,22 +141,19 @@ class ExamSurveillance:
         """
         current_time = time.time()
         
-        # Cooldown để không lưu quá nhiều ảnh
         if current_time - self.last_alert_time < self.alert_cooldown:
             return None
         
         self.last_alert_time = current_time
         self.alert_count += 1
         
-        # Tạo tên file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         violation_text = "_".join(v.replace(" ", "-") for v in violations)
         filename = f"alert_{timestamp}_{violation_text[:50]}.jpg"
         filepath = self.alerts_dir / filename
         
-        # Lưu ảnh
         cv2.imwrite(str(filepath), frame)
-        print(f"[ALERT] Da luu canh bao: {filepath}")
+        print(f"[ALERT] Saved: {filepath}")
         
         return filepath
     
@@ -218,14 +196,14 @@ class ExamSurveillance:
         cv2.putText(frame, timestamp, (w - text_size[0] - 20, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
         
-        # Vẽ face bounding boxes
+        # Vẽ face bounding boxes (màu xanh lá)
         for face in faces:
             x, y, fw, fh = face['bbox']
             cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
-            cv2.putText(frame, f"Face", 
+            cv2.putText(frame, "Face", 
                        (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
         
-        # Vẽ phone bounding boxes
+        # Vẽ phone bounding boxes (màu đỏ)
         for phone in phones:
             x, y, pw, ph = phone['bbox']
             cv2.rectangle(frame, (x, y), (x + pw, y + ph), (0, 0, 255), 3)
@@ -240,7 +218,7 @@ class ExamSurveillance:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         # Footer
-        footer_text = f"Alerts: {self.alert_count} | Press 'Q' to quit"
+        footer_text = f"Alerts: {self.alert_count} | Press 'Q' to quit | v2-COCO"
         cv2.putText(frame, footer_text, (20, h - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
         
@@ -249,26 +227,17 @@ class ExamSurveillance:
     def run(self, source=0):
         """
         Chạy hệ thống giám sát.
-        
-        Args:
-            source: 0 cho webcam, hoặc path đến video file
         """
-        print("=" * 60)
-        print("HE THONG GIAM SAT THI CU")
-        print("=" * 60)
-        print(f"Source: {'Webcam' if source == 0 else source}")
-        print(f"Alerts folder: {self.alerts_dir}")
-        print("\nNhan 'Q' de thoat")
-        print("=" * 60)
+        print(f"\nSource: {'Webcam' if source == 0 else source}")
+        print(f"Alerts folder: {self.alerts_dir.absolute()}")
+        print("\nNhan 'Q' de thoat\n")
         
-        # Mở camera/video
         cap = cv2.VideoCapture(source)
         
         if not cap.isOpened():
             print("ERROR: Khong the mo camera/video!")
             return
         
-        # Cấu hình camera
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_FPS, 30)
@@ -287,7 +256,7 @@ class ExamSurveillance:
                 # Detect faces
                 face_count, faces = self.detect_faces(frame)
                 
-                # Detect phones
+                # Detect phones (COCO cell phone class)
                 has_phone, phones = self.detect_phones(frame)
                 
                 # Check violations
@@ -316,7 +285,7 @@ class ExamSurveillance:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
                 
                 # Show
-                cv2.imshow("Exam Surveillance System", display_frame)
+                cv2.imshow("Exam Surveillance System v2", display_frame)
                 
                 # Check for quit
                 key = cv2.waitKey(1) & 0xFF
@@ -332,29 +301,22 @@ class ExamSurveillance:
             print("THONG KE PHIEN LAM VIEC")
             print("=" * 60)
             print(f"   Tong so canh bao: {self.alert_count}")
-            print(f"   Thu muc luu: {self.alerts_dir}")
+            print(f"   Thu muc luu: {self.alerts_dir.absolute()}")
             print("=" * 60)
 
 
 def main():
-    """
-    Entry point.
-    """
     import argparse
     
-    parser = argparse.ArgumentParser(description="Exam Surveillance System")
+    parser = argparse.ArgumentParser(description="Exam Surveillance System v2")
     parser.add_argument('--source', type=str, default='0',
                        help='Video source (0 for webcam, or path to video)')
-    parser.add_argument('--model', type=str, default=None,
-                       help='Path to phone detector model')
     
     args = parser.parse_args()
     
-    # Parse source
     source = int(args.source) if args.source.isdigit() else args.source
     
-    # Create and run system
-    system = ExamSurveillance(phone_model_path=args.model)
+    system = ExamSurveillance()
     system.run(source=source)
 
 
