@@ -37,8 +37,8 @@ class ExamSurveillance:
         print("Dang khoi tao he thong...")
         
         # Tạo thư mục lưu cảnh báo
-        self.alerts_dir = Path("alerts")
-        self.alerts_dir.mkdir(exist_ok=True)
+        self.alerts_dir = Path(__file__).resolve().parent / "alerts"
+        self.alerts_dir.mkdir(exist_ok=True, parents=True)
         
         # Khởi tạo Face Detector (OpenCV Haar Cascade)
         print("   [+] Loading Face Detection...")
@@ -73,7 +73,7 @@ class ExamSurveillance:
             gray,
             scaleFactor=1.1,
             minNeighbors=5,
-            minSize=(60, 60),
+            minSize=(30, 30),
             flags=cv2.CASCADE_SCALE_IMAGE
         )
         
@@ -164,6 +164,17 @@ class ExamSurveillance:
         """
         h, w, _ = frame.shape
         
+        # Calculate dynamic scales based on width
+        # Base on 640 width
+        scale_factor = w / 640.0
+        # Ensure minimum readability for very small windows
+        font_scale_header = max(0.4, 0.7 * scale_factor)
+        font_scale_info = max(0.3, 0.6 * scale_factor)
+        font_scale_box = max(0.3, 0.5 * scale_factor)
+        thickness = max(1, int(2 * scale_factor))
+        margin = max(5, int(20 * scale_factor))
+        line_height = max(15, int(30 * scale_factor))
+        
         # Màu dựa trên trạng thái
         if violations:
             status_color = (0, 0, 255)  # Đỏ
@@ -174,61 +185,66 @@ class ExamSurveillance:
             status_text = "BINH THUONG"
             border_color = (0, 255, 0)
         
-        # Vẽ viền trạng thái
-        cv2.rectangle(frame, (0, 0), (w-1, h-1), border_color, 8)
+        # Vẽ viền trạng thái (nếu muốn bỏ viền đen header thì vẫn giữ viền màu status)
+        cv2.rectangle(frame, (0, 0), (w-1, h-1), border_color, thickness*2)
         
-        # Header background
-        cv2.rectangle(frame, (0, 0), (w, 80), (0, 0, 0), -1)
-        cv2.rectangle(frame, (0, 0), (w, 80), border_color, 3)
+        # NOTE: Đã bỏ phần vẽ viền đen (header background) theo yêu cầu
         
-        # Status text
-        cv2.putText(frame, status_text, (20, 35), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+        # Status text (Vẽ trực tiếp lên hình, thêm shadow/outline đen để dễ đọc)
+        # Helper để vẽ text có viền
+        def draw_text_with_outline(img, text, pos, scale, color, thick):
+            cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, (0,0,0), thick+1) # Viền đen
+            cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick)
+            
+        # Status text position
+        draw_text_with_outline(frame, status_text, (margin, margin + int(10*scale_factor) + 10), 
+                             font_scale_header, status_color, thickness)
         
         # Info text
         info_text = f"Faces: {face_count} | Phone: {'YES' if has_phone else 'NO'}"
-        cv2.putText(frame, info_text, (20, 65), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        draw_text_with_outline(frame, info_text, (margin, margin + int(10*scale_factor) + 10 + line_height),
+                             font_scale_info, (255, 255, 255), thickness)
         
         # Timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        text_size = cv2.getTextSize(timestamp, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
-        cv2.putText(frame, timestamp, (w - text_size[0] - 20, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        text_size = cv2.getTextSize(timestamp, cv2.FONT_HERSHEY_SIMPLEX, font_scale_info, thickness)[0]
+        draw_text_with_outline(frame, timestamp, (w - text_size[0] - margin, margin + int(10*scale_factor) + 10),
+                             font_scale_info, (255, 255, 255), thickness)
         
-        # Vẽ face bounding boxes (màu xanh lá)
+        # Vẽ face bounding boxes
         for face in faces:
             x, y, fw, fh = face['bbox']
-            cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
-            cv2.putText(frame, "Face", 
-                       (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), thickness)
+            # Label Face
+            # cv2.putText(frame, "Face", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, font_scale_box, (0, 255, 0), thickness)
         
-        # Vẽ phone bounding boxes (màu đỏ)
+        # Vẽ phone bounding boxes
         for phone in phones:
             x, y, pw, ph = phone['bbox']
-            cv2.rectangle(frame, (x, y), (x + pw, y + ph), (0, 0, 255), 3)
-            cv2.putText(frame, f"PHONE {phone['confidence']:.2f}", 
-                       (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.rectangle(frame, (x, y), (x + pw, y + ph), (0, 0, 255), thickness)
+            cv2.putText(frame, f"PHONE", 
+                       (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, font_scale_box, (0, 0, 255), thickness)
         
         # Vẽ danh sách vi phạm
         if violations:
-            y_offset = 100
+            y_offset = margin + int(10*scale_factor) + 10 + line_height * 2
             for i, v in enumerate(violations):
-                cv2.putText(frame, f"[!] {v}", (20, y_offset + i*30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                draw_text_with_outline(frame, f"[!] {v}", (margin, y_offset + i*line_height),
+                                     font_scale_info, (0, 0, 255), thickness)
         
         # Footer
-        footer_text = f"Alerts: {self.alert_count} | Press 'Q' to quit | v2-COCO"
-        cv2.putText(frame, footer_text, (20, h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        footer_text = f"Alerts: {self.alert_count} | 'Q' to quit"
+        draw_text_with_outline(frame, footer_text, (margin, h - margin),
+                             font_scale_box, (200, 200, 200), 1)
         
         return frame
     
-    def run(self, source=0):
+    def run(self, source=0, width=640, height=480):
         """
         Chạy hệ thống giám sát.
         """
         print(f"\nSource: {'Webcam' if source == 0 else source}")
+        print(f"Resolution: {width}x{height}")
         print(f"Alerts folder: {self.alerts_dir.absolute()}")
         print("\nNhan 'Q' de thoat\n")
         
@@ -238,8 +254,8 @@ class ExamSurveillance:
             print("ERROR: Khong the mo camera/video!")
             return
         
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_FPS, 30)
         
         fps_time = time.time()
@@ -311,13 +327,17 @@ def main():
     parser = argparse.ArgumentParser(description="Exam Surveillance System v2")
     parser.add_argument('--source', type=str, default='0',
                        help='Video source (0 for webcam, or path to video)')
+    parser.add_argument('--width', type=int, default=90,
+                       help='Camera width (default: 90)')
+    parser.add_argument('--height', type=int, default=90,
+                       help='Camera height (default: 90)')
     
     args = parser.parse_args()
     
     source = int(args.source) if args.source.isdigit() else args.source
     
     system = ExamSurveillance()
-    system.run(source=source)
+    system.run(source=source, width=args.width, height=args.height)
 
 
 if __name__ == "__main__":
